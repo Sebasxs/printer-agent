@@ -48,155 +48,186 @@ const formatPhone = phone => {
    return phone;
 };
 
+const updateJobStatus = async (id, status) => {
+   await supabase.from('print_jobs').update({ status: status }).eq('id', id);
+};
+
 const printTicket = (jobId, data) => {
-   const device = new escpos.USB(VID, PID);
-   const options = { encoding: 'cp850', width: WIDTH_NORMAL };
-   const printer = new escpos.Printer(device, options);
+   return new Promise(async resolve => {
+      const device = new escpos.USB(VID, PID);
+      const options = { encoding: 'cp850', width: WIDTH_NORMAL };
+      const printer = new escpos.Printer(device, options);
 
-   console.log(`🖨️  Job ID: ${jobId}`);
+      console.log(`🖨️  Job ID: ${jobId}`);
 
-   device.open(async function (error) {
-      if (error) {
-         console.error('❌ Printer error:', error);
-         await updateJobStatus(jobId, 'error');
-         return;
-      }
+      device.open(async function (error) {
+         if (error) {
+            console.error('❌ Printer error:', error);
+            await updateJobStatus(jobId, 'error');
+            return resolve();
+         }
 
-      try {
-         const companyName = data.company?.name;
-         const companyPhone = formatPhone(data.company?.phone || '');
-         const cashier = data.invoice?.cashier?.toUpperCase() || 'ASESOR';
-         const address = data.company?.address;
+         try {
+            const companyName = data.company?.name;
+            const companyPhone = formatPhone(data.company?.phone || '');
+            const cashier = data.invoice?.cashier?.toUpperCase() || 'ASESOR';
+            const address = data.company?.address;
 
-         // ================= HEADER =================
-         printer
-            .font('a')
-            .align('ct')
-            .style('b')
-            .size(1, 1)
-            .text(companyName)
-            .size(0, 0)
-            .style('n')
-            .text(`NIT: ${data.company?.nit || ''}`);
+            // ================= HEADER =================
+            printer
+               .font('a')
+               .align('ct')
+               .style('b')
+               .size(1, 1)
+               .text(companyName)
+               .size(0, 0)
+               .style('n')
+               .text(`NIT: ${data.company?.nit || ''}`);
 
-         if (data.company?.regime) printer.text(data.company.regime);
-         if (address) printer.text(address);
-         if (companyPhone) printer.style('n').text(`TEL: ${companyPhone}`).style('n');
-
-         printer.text(LINE_DIVIDER);
-
-         // ================= INVOICE INFO =================
-         printer.align('lt');
-
-         printer.style('b');
-         printer.text(drawRow('FACTURA:', data.invoice?.number || '---'));
-         printer.style('n');
-
-         printer.text(drawRow('ASESOR:', cashier));
-         printer.text(drawRow('FECHA:', data.invoice.date));
-         printer.text(drawRow('HORA:', data.invoice.time));
-
-         printer.text(LINE_DIVIDER);
-
-         // ================= CUSTOMER =================
-         if (data.customer?.name) {
-            const customerName = data.customer?.name.toUpperCase();
-            printer.text(drawRow('CLIENTE:', customerName));
-
-            if (data.customer?.id_number) {
-               printer.text(drawRow('NIT/CC:', data.customer.id_number));
-            }
+            if (data.company?.regime) printer.text(data.company.regime);
+            if (address) printer.text(address);
+            if (companyPhone) printer.style('n').text(`TEL: ${companyPhone}`).style('n');
 
             printer.text(LINE_DIVIDER);
-         }
 
-         // ================= ITEMS =================
-         data.items.forEach(item => {
-            printer.style('b').text(item.description.toUpperCase()).style('n');
+            // ================= INVOICE INFO =================
+            printer.align('lt');
 
-            const detailLeft = `${item.qty} x ${formatCurrency(item.price)}`;
-            const totalItem = item.qty * item.price;
-            const detailRight = formatCurrency(totalItem);
+            printer.style('b');
+            printer.text(drawRow('FACTURA:', data.invoice?.number || '---'));
+            printer.style('n');
 
-            printer.text(drawRow(detailLeft, detailRight));
-         });
+            printer.text(drawRow('ASESOR:', cashier));
+            printer.text(drawRow('FECHA:', data.invoice.date));
+            printer.text(drawRow('HORA:', data.invoice.time));
 
-         printer.text(LINE_DIVIDER);
+            printer.text(LINE_DIVIDER);
 
-         // ================= TOTALS =================
-         if (data.totals.discount > 0) {
-            printer.text(drawRow('SUBTOTAL:', formatCurrency(data.totals.subtotal)));
-            printer.text(drawRow('DESCUENTO:', `-${formatCurrency(data.totals.discount)}`));
-         }
+            // ================= CUSTOMER =================
+            if (data.customer?.name) {
+               const customerName = data.customer?.name.toUpperCase();
+               printer.text(drawRow('CLIENTE:', customerName));
 
-         printer.feed(1);
-         printer.size(1, 1).style('b');
-         printer.text(drawRow('TOTAL:', formatCurrency(data.totals.total), ' ', WIDTH_DOUBLE));
-         printer.style('n').size(0, 0);
+               if (data.customer?.id_number) {
+                  printer.text(drawRow('NIT/CC:', data.customer.id_number));
+               }
 
-         printer.text(LINE_DIVIDER);
+               printer.text(LINE_DIVIDER);
+            }
 
-         // ================= PAYMENT METHODS =================
-         printer.align('ct').style('b').text('MEDIOS DE PAGO').style('n').align('lt');
+            // ================= ITEMS =================
+            data.items.forEach(item => {
+               printer.style('b').text(item.description.toUpperCase()).style('n');
 
-         const getAmount = methodKey => {
-            return (data.payments || [])
-               .filter(p => p.method === methodKey)
-               .reduce((acc, curr) => acc + (curr.amount || 0), 0);
-         };
+               const detailLeft = `${item.qty} x ${formatCurrency(item.price)}`;
+               const totalItem = item.qty * item.price;
+               const detailRight = formatCurrency(totalItem);
 
-         const cashAmount = getAmount('cash');
-         const transferAmount = getAmount('bank_transfer');
-         const balanceAmount = getAmount('account_balance');
-         const cardAmount = getAmount('credit_card');
+               printer.text(drawRow(detailLeft, detailRight));
+            });
 
-         printer.text(drawRow('EFECTIVO', formatCurrency(cashAmount)));
-         printer.text(drawRow('TRANSFERENCIA', formatCurrency(transferAmount)));
+            printer.text(LINE_DIVIDER);
 
-         if (cardAmount > 0) {
-            printer.text(drawRow('TARJETA', formatCurrency(cardAmount)));
-         }
-         if (balanceAmount > 0) {
-            printer.text(drawRow('SALDO FAVOR', formatCurrency(balanceAmount)));
-         }
+            // ================= TOTALS =================
+            if (data.totals.discount > 0) {
+               printer.text(drawRow('SUBTOTAL:', formatCurrency(data.totals.subtotal)));
+               printer.text(drawRow('DESCUENTO:', `-${formatCurrency(data.totals.discount)}`));
+            }
 
-         printer.text('.'.repeat(WIDTH_NORMAL));
+            printer.feed(1);
+            printer.size(1, 1).style('b');
+            printer.text(drawRow('TOTAL:', formatCurrency(data.totals.total), ' ', WIDTH_DOUBLE));
+            printer.style('n').size(0, 0);
 
-         const totalPagado = cashAmount + transferAmount + balanceAmount + cardAmount;
-         const cambio = Math.max(0, totalPagado - data.totals.total);
+            printer.text(LINE_DIVIDER);
 
-         printer.style('b');
-         printer.text(drawRow('CAMBIO', formatCurrency(cambio)));
-         printer.style('n');
+            // ================= PAYMENT METHODS =================
+            printer.align('ct').style('b').text('MEDIOS DE PAGO').style('n').align('lt');
 
-         // ================= FOOTER =================
-         printer.feed(2);
-         printer.align('ct');
+            const getAmount = methodKey => {
+               return (data.payments || [])
+                  .filter(p => p.method === methodKey)
+                  .reduce((acc, curr) => acc + (curr.amount || 0), 0);
+            };
 
-         const footerText = data.company?.footer || 'Gracias por su compra';
-         const lines = footerText.split('\n');
-         lines.forEach(l => printer.text(l.trim()));
+            const cashAmount = getAmount('cash');
+            const transferAmount = getAmount('bank_transfer');
+            const balanceAmount = getAmount('account_balance');
+            const cardAmount = getAmount('credit_card');
 
-         printer.text('-'.repeat(WIDTH_NORMAL));
-         printer.text('Sistema: sebasxs.com/smartpos');
-         printer.feed(3);
-         printer.cut();
-         printer.close();
+            printer.text(drawRow('EFECTIVO', formatCurrency(cashAmount)));
+            printer.text(drawRow('TRANSFERENCIA', formatCurrency(transferAmount)));
 
-         console.log('✅ Impresión finalizada.');
-         await updateJobStatus(jobId, 'printed');
-      } catch (printErr) {
-         console.error('🔥 Error impresión:', printErr);
-         await updateJobStatus(jobId, 'error');
-         try {
+            if (cardAmount > 0) {
+               printer.text(drawRow('TARJETA', formatCurrency(cardAmount)));
+            }
+            if (balanceAmount > 0) {
+               printer.text(drawRow('SALDO FAVOR', formatCurrency(balanceAmount)));
+            }
+
+            printer.text('.'.repeat(WIDTH_NORMAL));
+
+            const totalPagado = cashAmount + transferAmount + balanceAmount + cardAmount;
+            const cambio = Math.max(0, totalPagado - data.totals.total);
+
+            printer.style('b');
+            printer.text(drawRow('CAMBIO', formatCurrency(cambio)));
+            printer.style('n');
+
+            // ================= FOOTER =================
+            printer.feed(2);
+            printer.align('ct');
+
+            const footerText = data.company?.footer || 'Gracias por su compra';
+            const lines = footerText.split('\n');
+            lines.forEach(l => printer.text(l.trim()));
+
+            printer.text('-'.repeat(WIDTH_NORMAL));
+            printer.text('Sistema: sebasxs.com/smartpos');
+            printer.feed(3);
+            printer.cut();
             printer.close();
-         } catch (e) {}
-      }
+
+            console.log('✅ Job completed.');
+            await updateJobStatus(jobId, 'printed');
+            resolve();
+         } catch (printErr) {
+            console.error('🔥 Job error:', printErr);
+            await updateJobStatus(jobId, 'error');
+            try {
+               printer.close();
+            } catch (e) {}
+            resolve();
+         }
+      });
    });
 };
 
-const updateJobStatus = async (id, status) => {
-   await supabase.from('print_jobs').update({ status: status }).eq('id', id);
+let isPrinting = false;
+const queue = [];
+
+const processQueue = async () => {
+   if (isPrinting || queue.length === 0) return;
+
+   isPrinting = true;
+   const job = queue.shift();
+
+   try {
+      await printTicket(job.id, job.payload);
+
+      await new Promise(r => setTimeout(r, 3000));
+   } catch (e) {
+      console.error('Error procesando cola:', e);
+   } finally {
+      isPrinting = false;
+      processQueue();
+   }
+};
+
+const addToQueue = (id, payload) => {
+   console.log(`📥 Adding to queue: ID ${id}`);
+   queue.push({ id, payload });
+   processQueue();
 };
 
 // --- LISTENER ---
@@ -205,20 +236,18 @@ console.log('🚀 Printer Agent Starting...');
 const processPending = async () => {
    const { data } = await supabase.from('print_jobs').select('*').eq('status', 'pending');
    if (data && data.length > 0) {
-      console.log(`📦 Processing ${data.length} pending...`);
-      for (const job of data) {
-         await printTicket(job.id, job.payload);
-         await new Promise(r => setTimeout(r, 1500));
-      }
+      console.log(`📦 Encolando ${data.length} pendientes...`);
+      data.forEach(job => addToQueue(job.id, job.payload));
    }
 };
+
 processPending();
 
 supabase
    .channel('print_jobs_realtime')
    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'print_jobs' }, payload => {
       if (payload.new.status === 'pending') {
-         printTicket(payload.new.id, payload.new.payload);
+         addToQueue(payload.new.id, payload.new.payload);
       }
    })
    .subscribe();
