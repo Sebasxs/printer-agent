@@ -239,7 +239,7 @@ const performPrint = (jobId, data) => {
                stack: printErr.stack,
             });
             try {
-               printer.close();
+               if (printer) printer.close();
             } catch (e) {}
             reject(printErr);
          }
@@ -309,11 +309,16 @@ processPending();
 
 let myChannel = null;
 
-const setupListener = () => {
+const setupListener = async () => {
    logger.info('Starting Supabase realtime listener');
 
    if (myChannel) {
-      supabase.removeChannel(myChannel);
+      try {
+         await supabase.removeChannel(myChannel);
+      } catch (e) {
+         logger.warn('Error removing old channel', e);
+      }
+      myChannel = null;
    }
 
    myChannel = supabase
@@ -335,8 +340,11 @@ const setupListener = () => {
             processPending();
          }
 
-         if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
-            logger.error('Realtime connection error, restarting', { status, retryDelay: '10s' });
+         if (status === 'CHANNEL_ERROR') {
+            logger.error('Critical Realtime error, scheduling restart', {
+               status,
+               retryDelay: '10s',
+            });
 
             setTimeout(() => {
                setupListener();
@@ -349,6 +357,9 @@ setupListener();
 
 process.on('uncaughtException', err => {
    logger.error('Uncaught exception', { error: err.message, stack: err.stack });
+   setTimeout(() => {
+      process.exit(1);
+   }, 1000);
 });
 process.on('unhandledRejection', reason => {
    logger.error('Unhandled rejection', { reason: reason?.message || reason, stack: reason?.stack });
