@@ -365,4 +365,4 @@ process.on('unhandledRejection', reason => {
    logger.error('Unhandled rejection', { reason: reason?.message || reason, stack: reason?.stack });
 });
 
-setInterval(processPending, 5 * 60 * 1000);
+setInterval(processPending, 10 * 60 * 1000);
