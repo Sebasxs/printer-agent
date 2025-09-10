@@ -1,25 +1,31 @@
-require('dotenv').config();
-const { createClient } = require('@supabase/supabase-js');
+const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 
+const { createClient } = require('@supabase/supabase-js');
 const usb = require('usb');
+const escpos = require('escpos');
+escpos.USB = require('escpos-usb');
+
 if (!usb.on) {
    usb.on = function () {};
    usb.removeListener = function () {};
 }
 
-const escpos = require('escpos');
-escpos.USB = require('escpos-usb');
-
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY, {
-   auth: { persistSession: false, autoRefreshToken: false },
-});
-
 const VID = 0x0493;
 const PID = 0x8760;
-
 const WIDTH_NORMAL = 48;
 const WIDTH_DOUBLE = 24;
 const LINE_DIVIDER = '-'.repeat(WIDTH_NORMAL);
+const PRINTER_TIMEOUT = 10000;
+
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY, {
+   auth: { persistSession: false, autoRefreshToken: false },
+   realtime: {
+      params: {
+         eventsPerSecond: 10,
+      },
+   },
+});
 
 const drawRow = (leftStr, rightStr, fillChar = ' ', maxCols = WIDTH_NORMAL) => {
    let left = String(leftStr || '').substring(0, 32);
@@ -49,22 +55,34 @@ const formatPhone = phone => {
 };
 
 const updateJobStatus = async (id, status) => {
-   await supabase.from('print_jobs').update({ status: status }).eq('id', id);
+   try {
+      const payload = { status: status };
+      await supabase.from('print_jobs').update(payload).eq('id', id);
+   } catch (e) {
+      console.error(`Error updating job status (ID ${id}):`, e);
+   }
 };
 
-const printTicket = (jobId, data) => {
-   return new Promise(async resolve => {
-      const device = new escpos.USB(VID, PID);
-      const options = { encoding: 'cp850', width: WIDTH_NORMAL };
-      const printer = new escpos.Printer(device, options);
+const performPrint = (jobId, data) => {
+   return new Promise((resolve, reject) => {
+      let device = null;
+      let printer = null;
+
+      try {
+         device = new escpos.USB(VID, PID);
+         const options = { encoding: 'cp850', width: WIDTH_NORMAL };
+         printer = new escpos.Printer(device, options);
+      } catch (err) {
+         return reject(err);
+      }
 
       console.log(`🖨️  Job ID: ${jobId}`);
 
+      const items = Array.isArray(data.items) ? data.items : [];
+
       device.open(async function (error) {
          if (error) {
-            console.error('❌ Printer error:', error);
-            await updateJobStatus(jobId, 'error');
-            return resolve();
+            return reject(new Error(`Cannot open printer: ${error.message}`));
          }
 
          try {
@@ -116,7 +134,7 @@ const printTicket = (jobId, data) => {
             }
 
             // ================= ITEMS =================
-            data.items.forEach(item => {
+            items.forEach(item => {
                printer.style('b').text(item.description.toUpperCase()).style('n');
 
                const detailLeft = `${item.qty} x ${formatCurrency(item.price)}`;
@@ -186,21 +204,42 @@ const printTicket = (jobId, data) => {
             printer.text('Sistema: sebasxs.com/smartpos');
             printer.feed(3);
             printer.cut();
-            printer.close();
 
             console.log('✅ Job completed.');
-            await updateJobStatus(jobId, 'printed');
-            resolve();
+            setTimeout(() => {
+               try {
+                  printer.close();
+                  resolve();
+               } catch (e) {
+                  resolve();
+               }
+            }, 300);
          } catch (printErr) {
             console.error('🔥 Job error:', printErr);
-            await updateJobStatus(jobId, 'error');
             try {
                printer.close();
             } catch (e) {}
-            resolve();
+            reject(printErr);
          }
       });
    });
+};
+
+const printTicketSafe = async (jobId, data) => {
+   const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(
+         () => reject(new Error('Printer Timeout - Printer does not respond')),
+         PRINTER_TIMEOUT,
+      ),
+   );
+
+   try {
+      await Promise.race([performPrint(jobId, data), timeoutPromise]);
+      await updateJobStatus(jobId, 'printed');
+   } catch (error) {
+      console.error(`Error processing Job ${jobId}:`, error);
+      await updateJobStatus(jobId, 'error');
+   }
 };
 
 let isPrinting = false;
@@ -213,11 +252,10 @@ const processQueue = async () => {
    const job = queue.shift();
 
    try {
-      await printTicket(job.id, job.payload);
-
-      await new Promise(r => setTimeout(r, 3000));
+      await printTicketSafe(job.id, job.payload);
+      await new Promise(r => setTimeout(r, 2000));
    } catch (e) {
-      console.error('Error procesando cola:', e);
+      console.error('Error processing queue:', e);
    } finally {
       isPrinting = false;
       processQueue();
@@ -230,24 +268,68 @@ const addToQueue = (id, payload) => {
    processQueue();
 };
 
-// --- LISTENER ---
 console.log('🚀 Printer Agent Starting...');
 
 const processPending = async () => {
-   const { data } = await supabase.from('print_jobs').select('*').eq('status', 'pending');
-   if (data && data.length > 0) {
-      console.log(`📦 Encolando ${data.length} pendientes...`);
-      data.forEach(job => addToQueue(job.id, job.payload));
+   try {
+      const { data, error } = await supabase.from('print_jobs').select('*').eq('status', 'pending');
+      if (error) throw error;
+      if (data && data.length > 0) {
+         console.log(`📦 Enqueueing ${data.length} pending...`);
+         data.forEach(job => addToQueue(job.id, job.payload));
+      }
+   } catch (e) {
+      console.error('Error searching for pending:', e);
    }
 };
 
 processPending();
 
-supabase
-   .channel('print_jobs_realtime')
-   .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'print_jobs' }, payload => {
-      if (payload.new.status === 'pending') {
-         addToQueue(payload.new.id, payload.new.payload);
-      }
-   })
-   .subscribe();
+let myChannel = null;
+
+const setupListener = () => {
+   console.log('📡 (Re)Starting Supabase listener...');
+
+   if (myChannel) {
+      supabase.removeChannel(myChannel);
+   }
+
+   myChannel = supabase
+      .channel('print_jobs_realtime')
+      .on(
+         'postgres_changes',
+         { event: 'INSERT', schema: 'public', table: 'print_jobs' },
+         payload => {
+            if (payload.new.status === 'pending') {
+               addToQueue(payload.new.id, payload.new.payload);
+            }
+         },
+      )
+      .subscribe(status => {
+         console.log(`Socket status: ${status}`);
+
+         if (status === 'SUBSCRIBED') {
+            console.log('✅ Connected to Realtime. Listening...');
+            processPending();
+         }
+
+         if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+            console.error(`⚠️ Error in connection (${status}). Restarting in 10s...`);
+
+            setTimeout(() => {
+               setupListener();
+            }, 10_000);
+         }
+      });
+};
+
+setupListener();
+
+process.on('uncaughtException', err => {
+   console.error('UNCAUGHT EXCEPTION:', err);
+});
+process.on('unhandledRejection', reason => {
+   console.error('UNHANDLED REJECTION:', reason);
+});
+
+setInterval(processPending, 5 * 60 * 1000);
