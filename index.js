@@ -339,17 +339,6 @@ const setupListener = async () => {
             logger.info('Connected to Realtime successfully');
             processPending();
          }
-
-         if (status === 'CHANNEL_ERROR') {
-            logger.error('Critical Realtime error, scheduling restart', {
-               status,
-               retryDelay: '10s',
-            });
-
-            setTimeout(() => {
-               setupListener();
-            }, 10_000);
-         }
       });
 };
 
@@ -366,3 +355,11 @@ process.on('unhandledRejection', reason => {
 });
 
 setInterval(processPending, 10 * 60 * 1000);
+
+setInterval(() => {
+   if (!myChannel) {
+      logger.warn('Watchdog: Channel is null, restarting...');
+      setupListener();
+      return;
+   }
+}, 60000);
