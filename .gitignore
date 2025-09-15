@@ -1,3 +1,4 @@
 node_modules
 .env
-gcp-key.json
+credentials
+bin/node.exe
